@@ -10,10 +10,11 @@
  * 时间步：Cocos 无 FixedUpdate，用累加器自实现固定步长（§6.2）；
  * 骨骼回写在 lateUpdate（渲染前最后执行，覆盖动画写入）。
  */
-import { _decorator, Component, Node, CCInteger, CCFloat } from 'cc';
+import { _decorator, Component, Node, CCInteger, CCFloat, input, Input, EventTouch, EventMouse, EventKeyboard, KeyCode, Camera, director, geometry } from 'cc';
 import { instantiateSkeleton, MRRagdollInstance } from '../core/MRDefaultSkeleton';
 import { MRBody } from '../core/MRBody';
 import { MRVec3, MRQuat } from '../core/MRMath';
+import { closestPtSegmentSegment } from '../core/MRCollision';
 import { MRGroundPlane } from '../core/MRGround';
 import { MRGround } from './MRGround';
 import { BONE_ORDER, buildSkeletonDef } from './MRRagdollBuilder';
@@ -56,15 +57,30 @@ export class MRRagdoll extends Component {
   @property({ tooltip: '运行时自检日志：每 0.5s 输出体高/速度/NaN/锚点误差（联调验证用）' })
   debugLog = false;
 
+  @property({ type: CCFloat, tooltip: '点击命中时施加的冲量（N·s，M4 验收基准 200）；0 = 禁用点击击飞' })
+  clickImpulse = 200;
+
+  @property({ type: CCFloat, tooltip: '命中体速度上限（m/s）：冲量按命中体质量限幅，点手臂=甩动带动身体，点躯干=整体击飞' })
+  maxHitDv = 8;
+
+  @property({ type: CCFloat, tooltip: '击飞上抬分量：冲量方向 = 视线方向 + up×该系数（归一化）' })
+  hitUpBias = 0.35;
+
   /** core 实例（构建后有效） */
   instance: MRRagdollInstance | null = null;
 
-  /** 骨骼回写绑定 */
-  private bindings: BoneBinding[] = [];
+  /**
+   * 骨骼回写绑定（build 后只读）。
+   * localRot = conj(q_body_bind) ⊗ q_bone_bind（bone 世界旋转 = q_body ⊗ localRot），
+   * 电机目标换算到求解器参考系需要它（MRActiveController.captureTargets）。
+   */
+  bindings: BoneBinding[] = [];
   /** 固定步长累加器 */
   private acc = 0;
   /** 是否已把骨骼 bind 相对位姿存好 */
   private built = false;
+  /** build 时刻各骨骼节点的世界位姿快照（reset 恢复用） */
+  private bindPoses: { pos: import('cc').Vec3; rot: import('cc').Quat }[] = [];
   /** 运行时间（自检日志计时用） */
   private elapsed = 0;
   /** 自检日志间隔计时 */
@@ -79,6 +95,18 @@ export class MRRagdoll extends Component {
     // 兼容 Animation（关键帧动画）与 AnimationController（动画图）
     const anim = this.getComponent('Animation') || this.getComponent('AnimationController');
     (anim as { stop?: () => void } | null)?.stop?.();
+    // 演示交互：点击击飞 / R 复位（M4 验收场景；纯被动布娃娃，无电机参与）。
+    // 坐标换算交给引擎：getLocation() 已含画布偏移/缩放/左下原点翻转，
+    // 与 screenPointToRay 同一约定 —— 不要手动从 canvas rect 推算（DPR 假设脆弱）。
+    input.on(Input.EventType.MOUSE_DOWN, this.onPointerDown, this);
+    input.on(Input.EventType.TOUCH_START, this.onPointerDown, this);
+    input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this);
+  }
+
+  onDisable(): void {
+    input.off(Input.EventType.MOUSE_DOWN, this.onPointerDown, this);
+    input.off(Input.EventType.TOUCH_START, this.onPointerDown, this);
+    input.off(Input.EventType.KEY_DOWN, this.onKeyDown, this);
   }
 
   /** 构建（必须在 bind 姿态下调用） */
@@ -89,6 +117,8 @@ export class MRRagdoll extends Component {
     }
     // Cocos 场景里的世界矩阵确保最新
     for (const n of this.boneNodes) n.updateWorldTransform();
+    // 快照当前世界位姿（reset 回到此姿态重新构建）
+    this.bindPoses = this.boneNodes.map((n) => ({ pos: n.worldPosition.clone(), rot: n.worldRotation.clone() }));
 
     const def = buildSkeletonDef(this.boneNodes, { scaleAdjust: this.scaleAdjust, totalMass: this.totalMass });
     this.instance = instantiateSkeleton(def);
@@ -133,6 +163,81 @@ export class MRRagdoll extends Component {
   applyHit(strengthDrop: number, recoverSeconds: number): void {
     const ctrl = this.getComponent('MRActiveController') as unknown as { applyHit: (a: number, b: number) => void } | null;
     if (ctrl) ctrl.applyHit(strengthDrop, recoverSeconds);
+  }
+
+  /**
+   * 复位：把骨骼恢复到 build 时刻的 bind 世界位姿并重建实例（新 solver、零速度）。
+   * 击倒后重新演示用。MRActiveController 检测到实例更换后自动重建电机并复位强度。
+   */
+  reset(): void {
+    if (this.bindPoses.length !== this.boneNodes.length) return;
+    for (let i = 0; i < this.boneNodes.length; i++) {
+      const n = this.boneNodes[i];
+      n.worldRotation = this.bindPoses[i].rot;
+      n.worldPosition = this.bindPoses[i].pos;
+    }
+    this.instance = null;
+    this.bindings = [];
+    this.built = false;
+    this.acc = 0;
+    this.build();
+  }
+
+  // ---- 演示交互：点击击飞 / R 复位（M4 验收场景，纯被动无电机）----
+
+  /** 点击（鼠标/触摸）：沿摄像机射线解析拾取 capsule，命中刚体在命中点施加冲量（按质量限幅） */
+  private onPointerDown(e: EventTouch | EventMouse): void {
+    const inst = this.instance;
+    if (!inst || this.clickImpulse <= 0) return;
+    const scene = director.getScene();
+    const cam = scene ? scene.getComponentInChildren(Camera) : null;
+    if (!cam) return;
+    const loc = e.getLocation();
+    cam.screenPointToRay(loc.x, loc.y, pointerRay);
+
+    const ox = pointerRay.o.x, oy = pointerRay.o.y, oz = pointerRay.o.z;
+    const dx = pointerRay.d.x, dy = pointerRay.d.y, dz = pointerRay.d.z;
+    rayP1.set(ox, oy, oz);
+    rayP2.set(ox + dx * PICK_DIST, oy + dy * PICK_DIST, oz + dz * PICK_DIST);
+    rayDir.set(dx, dy, dz);
+
+    // 逐 capsule 求射线-线段最近距离，取沿射线最近（最先命中）者
+    let bestT = Number.POSITIVE_INFINITY;
+    let bestBody: MRBody | null = null;
+    for (const cap of inst.solver.capsules) {
+      cap.worldP1(capP1);
+      cap.worldP2(capP2);
+      const distSqr = closestPtSegmentSegment(rayP1, rayP2, capP1, capP2, pickC1, pickC2);
+      const rSum = cap.radius + PICK_PAD;
+      if (distSqr >= rSum * rSum) continue;
+      const t = pickC1.sub(rayP1).dot(rayDir);
+      if (t < bestT) {
+        bestT = t;
+        bestBody = cap.body;
+        bestHit.set(rayP1.x + rayDir.x * t, rayP1.y + rayDir.y * t, rayP1.z + rayDir.z * t);
+      }
+    }
+    if (!bestBody) return;
+
+    // 冲量：视线方向 + 上抬分量（击飞），作用于命中点（含翻转角冲量）。
+    // 按命中体质量限幅：同一拍打力打在轻肢体上 Δv 会到几十 m/s（实测手臂 91），
+    // 观感假；限幅后点手臂=甩动带动身体，点躯干=整体击飞。
+    jDir.copy(rayDir).addScaled(UP_VEC, this.hitUpBias).normalize();
+    const jMag = Math.min(this.clickImpulse, this.maxHitDv / bestBody.invMass);
+    jImp.copy(jDir).scale(jMag);
+    bestBody.v.addScaled(jImp, bestBody.invMass);
+    rHit.set(bestHit.x - bestBody.x.x, bestHit.y - bestBody.x.y, bestHit.z - bestBody.x.z);
+    rxJ.cross(rHit, jImp);
+    const I = bestBody.invIworld.m;
+    bestBody.w.x += I[0] * rxJ.x + I[1] * rxJ.y + I[2] * rxJ.z;
+    bestBody.w.y += I[3] * rxJ.x + I[4] * rxJ.y + I[5] * rxJ.z;
+    bestBody.w.z += I[6] * rxJ.x + I[7] * rxJ.y + I[8] * rxJ.z;
+    if (this.debugLog) console.log(`[MRRagdoll] hit ${bestBody.name}, J=${jMag.toFixed(1)} N·s`);
+  }
+
+  /** R 键：复位到 bind 位姿重新掉落 */
+  private onKeyDown(e: EventKeyboard): void {
+    if (e.keyCode === KeyCode.KEY_R) this.reset();
   }
 
   update(dt: number): void {
@@ -201,6 +306,24 @@ export class MRRagdoll extends Component {
 // runtime 内部临时量
 const mrTmpV = new MRVec3();
 const mrTmpQ = new MRQuat();
+
+// 点击拾取/冲量模块级常量与临时量
+const PICK_DIST = 50; // 射线拾取线段长度（米）
+const PICK_PAD = 0.08; // 拾取放宽半径（米）：capsule 较细，纯表面拾取难点中
+const UP_VEC = new MRVec3(0, 1, 0);
+const pointerRay = new geometry.Ray();
+const rayP1 = new MRVec3();
+const rayP2 = new MRVec3();
+const rayDir = new MRVec3();
+const capP1 = new MRVec3();
+const capP2 = new MRVec3();
+const pickC1 = new MRVec3();
+const pickC2 = new MRVec3();
+const bestHit = new MRVec3();
+const jDir = new MRVec3();
+const jImp = new MRVec3();
+const rHit = new MRVec3();
+const rxJ = new MRVec3();
 
 /** v ← conj(q)·v·q（用 Rodrigues 等价实现，q 需为单位四元数） */
 function invQuatApply(q: MRQuat, v: MRVec3): void {

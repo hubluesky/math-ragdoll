@@ -13,6 +13,16 @@ import { MRBody } from './MRBody';
 export const LINEAR_CORRECTION_CLAMP = 0.05; // m
 export const ANGULAR_CORRECTION_CLAMP = 0.2; // rad
 
+/**
+ * 接触穿透容差：浅于此深度的穿透不修正、不施摩擦。
+ * 稳态穿透 ≈ slop + 每子步重力压入量（双端支撑地面时各端扣一次，合计 2·slop），
+ * 速度回读为零、完全静止。没有容差时，重力每子步压入的微小穿透都会触发
+ * 一次位置修正 → 检测阈值附近反复"修正-分离-再接触"，每次修正的速度回读
+ * 都是一个脉冲，静置后持续微抖。
+ * 取值约束：2·slop + 压入量 需留出 M1/M3 验收（穿透 < 1mm）余量。
+ */
+export const CONTACT_SLOP = 0.0003; // 0.3mm
+
 export class MRContact {
   A: MRBody;
   B: MRBody | null; // null = 静态地面
@@ -71,7 +81,10 @@ export class MRContact {
     }
     if (w <= 1e-12) return;
 
-    let lambda = this.depth / w; // 恒为正
+    const depthEff = this.depth - CONTACT_SLOP;
+    if (depthEff <= 0) return; // slop 内：不修法向也不施摩擦（摩擦预算随法向脉冲走）
+
+    let lambda = depthEff / w; // 恒为正
     // 单次线修正钳制（防止深穿透弹飞）
     if (!A.isStatic && A.invMass > 0) lambda = Math.min(lambda, LINEAR_CORRECTION_CLAMP / A.invMass);
     if (B !== null && !B.isStatic && B.invMass > 0) lambda = Math.min(lambda, LINEAR_CORRECTION_CLAMP / B.invMass);
@@ -88,7 +101,7 @@ export class MRContact {
     // ---- 摩擦（Macklin 位置法摩擦，用法向求解前测量的 dispT）----
     if (!applyFriction || dispTLen < 1e-10) return;
 
-    const maxT = this.friction * this.depth;
+    const maxT = this.friction * depthEff;
     if (maxT <= 0) return;
     if (dispTLen > maxT) dispT.scale(maxT / dispTLen);
 
@@ -117,6 +130,70 @@ export class MRContact {
       applyPointImpulse(B, rB, dir, fLambda, tDPhi, tAxis, tRxN, tQuat);
     }
   }
+
+  /**
+   * 接触速度松弛（XPBD 速度阶段，restitution=0）：消除接触点"朝穿透方向"
+   * 的相对法向速度（压到 0，不反弹不助推）。
+   * 没有这一步，位置法接触每子步的"重力/挤压压入 → 位置修正弹出"在速度
+   * 回读下变成固定步级方波 —— 静置肢体原地微跳、接触对反复触发-分离。
+   * 用最新 rot 把接触锚点转回世界系（位置阶段后位姿未再变）。
+   */
+  solveVelocity(): void {
+    const A = this.A;
+    const B = this.B;
+    const n = this.n;
+
+    // vRelN = (vA + ωA×rA − vB − ωB×rB)·n；< 0 = 压入中
+    let vRelN = 0;
+    if (!A.isStatic) {
+      const rA = applyWorldR(A, this.rALocal, tRA);
+      vRelN += A.v.dot(n) + tVel1.cross(A.w, rA).dot(n);
+    }
+    if (B !== null && !B.isStatic) {
+      const rB = applyWorldR(B, this.rBLocal, tRB);
+      vRelN -= B.v.dot(n) + tVel1.cross(B.w, rB).dot(n);
+    }
+    if (vRelN >= 0) return; // 分离中或静止，不干预
+
+    let w = 0;
+    if (!A.isStatic) {
+      const rA = applyWorldR(A, this.rALocal, tRA);
+      w += A.invMass + generalAngularInvMass(A.invIworld, rA, n, tRxN);
+    }
+    if (B !== null && !B.isStatic) {
+      const rB = applyWorldR(B, this.rBLocal, tRB);
+      w += B.invMass + generalAngularInvMass(B.invIworld, rB, n, tRxN);
+    }
+    if (w <= 1e-12) return;
+
+    // 冲量 j·n（j>0）：A 沿 +n 刹车、B 沿 −n 刹车，ΔvRelN = j·w = −vRelN。
+    // 0.5 欠松弛与位置阶段对称（见 MRJoint.projectRelativeAngularVelocity 注释）。
+    const j = -0.5 * vRelN / w;
+    if (!A.isStatic) {
+      const rA = applyWorldR(A, this.rALocal, tRA);
+      A.v.addScaled(n, j * A.invMass);
+      tVel1.cross(rA, n).scale(j);
+      applyAngVelImpulse(A, tVel1);
+    }
+    if (B !== null && !B.isStatic) {
+      const rB = applyWorldR(B, this.rBLocal, tRB);
+      B.v.addScaled(n, -j * B.invMass);
+      tVel1.cross(rB, n).scale(-j);
+      applyAngVelImpulse(B, tVel1);
+    }
+  }
+}
+
+/** 角速度冲量：ω += invI·Δω（仅速度层面，不动位姿） */
+function applyAngVelImpulse(body: MRBody, dw: Readonly<MRVec3>): void {
+  const I = body.invIworld.m;
+  body.w.add(
+    tVel2.set(
+      I[0] * dw.x + I[1] * dw.y + I[2] * dw.z,
+      I[3] * dw.x + I[4] * dw.y + I[5] * dw.z,
+      I[6] * dw.x + I[7] * dw.y + I[8] * dw.z,
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +212,8 @@ const tD1 = new MRVec3();
 const tDisp = new MRVec3();
 const tDispT = new MRVec3();
 const tDir = new MRVec3();
+const tVel1 = new MRVec3();
+const tVel2 = new MRVec3();
 
 /** rWorld = R · rLocal（用子步开始缓存的 rot；invIworld 同样是子步开始缓存，与 Müller 实现一致） */
 function applyWorldR(body: MRBody, rLocal: Readonly<MRVec3>, out: MRVec3): MRVec3 {

@@ -86,6 +86,89 @@ function subSkewBlock(K: MRMat3, r: Readonly<MRVec3>, invI: Readonly<MRMat3>): v
 }
 
 // ---------------------------------------------------------------------------
+// 速度松弛（XPBD 速度阶段：位置求解 → 速度更新 → 速度投影）
+// ---------------------------------------------------------------------------
+
+/**
+ * 相对角速度投影内核：消除两体沿 n̂ 的相对角速度分量。
+ * oneSided=true（单边约束：限位）只消除"加深违反"方向的分量（wRel<0），
+ * 退出违反方向不助推；oneSided=false（等式约束：角对齐）双向压到 0。
+ *
+ * 0.5 欠松弛与位置阶段（applyAngularPair 每步消除一半违反）对称：
+ * 速度级序贯投影在多约束循环耦合（12 关节 × 锚点/角对齐/限位/接触）下
+ * 全量投影会互相拉锯发散（实测 3s 内冲到 1~3 m/s），欠松弛后子步级
+ * 收敛仍远快于固定步级方波周期，抑制效果不减。
+ *
+ * 没有速度阶段，位置修正经速度回读变成速度，与持续压入源（重力/电机/
+ * 约束耦合）形成固定步级方波 —— 贴边关节原地高频抽搐的根源（实测前臂
+ * 绕铰链轴 12 rad/s 拧转永不衰减：拧转是行程限位测不到的自由自由度）。
+ */
+export function projectRelativeAngularVelocity(
+  A: MRBody, B: MRBody, corr: Readonly<MRVec3>, oneSided: boolean,
+): void {
+  const C = corr.length();
+  if (C < 1e-12 || !Number.isFinite(C)) return;
+  const n = tNPair.copy(corr).scale(1 / C);
+  const wRel = (A.w.x - B.w.x) * n.x + (A.w.y - B.w.y) * n.y + (A.w.z - B.w.z) * n.z;
+  if (oneSided ? wRel >= 0 : Math.abs(wRel) < 1e-12) return;
+  const w = angularInvMassAlong(A, n) + angularInvMassAlong(B, n);
+  if (w <= 1e-12) return;
+  const j = -0.5 * wRel / w;
+  applyInvI(A, n, tD1A);
+  A.w.addScaled(tD1A, j);
+  applyInvI(B, n, tD1B);
+  B.w.addScaled(tD1B, -j);
+}
+
+/**
+ * 球关节速度松弛：把两体锚点相对速度按有效质量矩阵 K 消除
+ * （等式约束 restitution=0 语义，K 与位置级相同、无 compliance 项）。
+ * 关节链抽搐的注入通道之一：位置修正回读出的锚点相对速度与持续驱动源
+ * （电机/重力/接触修正）拉锯。投影后关节保持刚性连接，电机只能驱动
+ * 整体运动而非拉扯关节。
+ */
+export function solveBallVelocity(
+  A: MRBody, B: MRBody,
+  rALocal: Readonly<MRVec3>, rBLocal: Readonly<MRVec3>,
+): void {
+  const rA = A.rot.applyToVec3(rALocal, pjR1);
+  const rB = B.rot.applyToVec3(rBLocal, pjR2);
+
+  // vRel = (vA + ωA×rA) − (vB + ωB×rB)
+  const vRel = bvRel.copy(A.v).add(bvT1.cross(A.w, rA));
+  vRel.sub(bvT2.copy(B.v)).sub(bvT3.cross(B.w, rB));
+
+  // K = (invM_A + invM_B)·I − [rA]×·invI_A·[rA]× − [rB]×·invI_B·[rB]×
+  const K = pjK.identity();
+  const wLin = (A.isStatic ? 0 : A.invMass) + (B.isStatic ? 0 : B.invMass);
+  K.m[0] += wLin; K.m[4] += wLin; K.m[8] += wLin;
+  subSkewBlock(K, rA, A.invIworld);
+  subSkewBlock(K, rB, B.invIworld);
+
+  // J = −0.5·K⁻¹·vRel（冲量使 ΔvRel = −0.5·vRel；0.5 欠松弛见 projectRelativeAngularVelocity）
+  const J = solve3x3(K, vRel, pjL);
+  J.negate().scale(0.5);
+
+  if (!A.isStatic) {
+    A.v.addScaled(J, A.invMass);
+    bvT1.cross(rA, J);
+    applyInvI(A, bvT1, bvT2);
+    A.w.add(bvT2);
+  }
+  if (!B.isStatic) {
+    B.v.addScaled(J, -B.invMass);
+    bvT1.cross(rB, J);
+    applyInvI(B, bvT1, bvT2);
+    B.w.sub(bvT2);
+  }
+}
+
+const bvRel = new MRVec3();
+const bvT1 = new MRVec3();
+const bvT2 = new MRVec3();
+const bvT3 = new MRVec3();
+
+// ---------------------------------------------------------------------------
 // MRBallJoint
 // ---------------------------------------------------------------------------
 
@@ -105,6 +188,12 @@ export class MRBallJoint {
 
   solve(h: number): void {
     solveBallPosition(this.A, this.B, this.rALocal, this.rBLocal, h, this.compliance);
+  }
+
+  /** 速度松弛：软关节（compliance>0）不投影，位置违反由柔顺性吸收 */
+  solveVelocity(): void {
+    if (this.compliance > 0) return;
+    solveBallVelocity(this.A, this.B, this.rALocal, this.rBLocal);
   }
 }
 
@@ -154,6 +243,15 @@ export class MRHingeJoint {
     const uB = B.rot.applyToVec3(this.hingeAxisBLocal, tU2);
     const corr = tG1.cross(uA, uB);
     applyAngularPair(A, B, corr);
+  }
+
+  /** 速度松弛：锚点速度投影 + 铰链轴对齐的双向角速度投影（行程限位另由 MRLimit 处理） */
+  solveVelocity(): void {
+    solveBallVelocity(this.A, this.B, this.rALocal, this.rBLocal);
+    const uA = this.A.rot.applyToVec3(this.hingeAxisALocal, tU1);
+    const uB = this.B.rot.applyToVec3(this.hingeAxisBLocal, tU2);
+    const corr = tG1.cross(uA, uB);
+    projectRelativeAngularVelocity(this.A, this.B, corr, false);
   }
 }
 

@@ -13,7 +13,19 @@
  */
 import { MRVec3, MRQuat, clamp } from './MRMath';
 import { MRBody } from './MRBody';
-import { MRHingeJoint, applyAngularPair } from './MRJoint';
+import { MRHingeJoint, applyAngularPair, projectRelativeAngularVelocity } from './MRJoint';
+
+/**
+ * 限位软边界：修正目标点是外推 LIMIT_SLOP 的软边界，而非硬边界。
+ * 肘/膝等 aMin=0 的关节静置时贴死边界，重力每子步把关节压过界一丝、
+ * 限位又修回来，修正经速度回读变成角速度 —— 边界上永不衰减的 chatter。
+ * 软边界让贴边静默（超界 < LIMIT_SLOP 不修），超软边界的部分才修，
+ * 稳态超硬边界 ≈ LIMIT_SLOP + 欠松弛收敛残余（M3 验收容差 2°、
+ * 符号实证容差 0.5° 之内）。
+ * 注意不能做成"超界 < slop 时整段不修"：那样违反会积累到 slop 再一次
+ * 全量爆发，脉冲反而更大。
+ */
+export const LIMIT_SLOP = 0.25 * Math.PI / 180;
 
 /** 绕轴 n 从 a 到 b 的有符号角（参考实现 getAngle） */
 function getAngle(n: Readonly<MRVec3>, a: Readonly<MRVec3>, b: Readonly<MRVec3>, tmpCross: MRVec3): number {
@@ -32,9 +44,24 @@ function limitAngle(
   A: MRBody, B: MRBody,
   tCross: MRVec3, tRa: MRVec3, tCorr: MRVec3,
 ): void {
+  if (measureViolation(n, a, b, minAngle, maxAngle, tCross, tRa, tCorr) === 0) return;
+  applyAngularPair(A, B, tCorr);
+}
+
+/**
+ * 测量 a 绕 n 相对 b 超出 [min−SLOP, max+SLOP] 软边界的违反量。
+ * 返回 0 = 无违反；>0 时 tCorr = 修正旋转向量（方向 = 修正轴，
+ * 大小 = sin(到软边界的角差)），与 applyAngularPair 的约定一致，
+ * 位置修正与速度松弛共用同一测量。
+ */
+function measureViolation(
+  n: Readonly<MRVec3>, a: Readonly<MRVec3>, b: Readonly<MRVec3>,
+  minAngle: number, maxAngle: number,
+  tCross: MRVec3, tRa: MRVec3, tCorr: MRVec3,
+): number {
   const phi = getAngle(n, a, b, tCross);
-  if (phi >= minAngle && phi <= maxAngle) return;
-  const phiC = clamp(phi, minAngle, maxAngle);
+  const phiC = clamp(phi, minAngle - LIMIT_SLOP, maxAngle + LIMIT_SLOP);
+  if (phi === phiC) return 0;
   // ra = a 绕 n 转 phiC（Rodrigues）
   const cos = Math.cos(phiC), sin = Math.sin(phiC), one = 1 - cos;
   const kdot = n.x * a.x + n.y * a.y + n.z * a.z;
@@ -47,7 +74,19 @@ function limitAngle(
     a.z * cos + cz * sin + n.z * kdot * one,
   );
   tCorr.cross(tRa, b);
-  applyAngularPair(A, B, tCorr);
+  return Math.abs(phi - phiC);
+}
+
+/**
+ * 限位速度松弛（XPBD 速度阶段，单边约束 restitution=0 语义）：
+ * tCorr 为 measureViolation 输出的修正轴；两体相对角速度沿该轴的分量
+ * 若朝"加深违反"方向，按广义逆质量消除之（压到 0，不反向助推）。
+ * 没有这一步，位置法限位的修正经速度回读变成反向角速度，与持续压入源
+ * （重力/电机/约束耦合）形成固定步级方波 —— 贴边关节原地高频抽搐。
+ * 投影后稳态 = 恒力矩压在软边界上（零速度），不再弹跳。
+ */
+function solveLimitVelocity(A: MRBody, B: MRBody, corr: Readonly<MRVec3>): void {
+  projectRelativeAngularVelocity(A, B, corr, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,6 +161,40 @@ export class MRConeTwistLimit {
     vB.addScaled(n2, -n2.dot(vB)).normalize();
     return { coneAngle, twistAngle: getAngle(n2, vA, vB, tCross) };
   }
+
+  /**
+   * 速度松弛（XPBD 速度阶段，子步速度更新后调用）：
+   * 锥面与扭转各自独立投影——测量与 solve() 同构，仅把位置修正换成
+   * "加深违反方向的相对角速度消除"。
+   */
+  solveVelocity(): void {
+    const A = this.A;
+    const B = this.B;
+    const a0 = A.rot.applyToVec3(this.axisALocal, tA0);
+    const a1 = B.rot.applyToVec3(this.axisBLocal, tA1);
+
+    // ---- 锥面 ----
+    const n = tN.cross(a0, a1);
+    if (n.length() > 1e-9) {
+      if (measureViolation(n, a0, a1, 0, this.coneMax, tCross, tRa, tCorr) > 0) {
+        solveLimitVelocity(A, B, tCorr);
+      }
+    }
+
+    // ---- 扭转 ----
+    const n2 = tN2.copy(a0).add(a1);
+    const n2Len = n2.length();
+    if (n2Len > 1e-9) {
+      n2.scale(1 / n2Len);
+      const vA = A.rot.applyToVec3(this.twistRefALocal, tVA);
+      const vB = B.rot.applyToVec3(this.twistRefBLocal, tVB);
+      vA.addScaled(n2, -n2.dot(vA)).normalize();
+      vB.addScaled(n2, -n2.dot(vB)).normalize();
+      if (measureViolation(n2, vA, vB, this.twistMin, this.twistMax, tCross, tRa, tCorr) > 0) {
+        solveLimitVelocity(A, B, tCorr);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +219,26 @@ export function solveHingeRange(hinge: MRHingeJoint): void {
   if (vB.lengthSqr() < 1e-12) return;
   vB.normalize();
   limitAngle(n, vA, vB, hinge.aMin, hinge.aMax, A, B, tCross, tRa, tCorr);
+}
+
+/**
+ * 铰链行程限位的速度松弛（子步速度更新后调用，与 solveHingeRange 配对）。
+ * 绕铰链轴的拧转是行程测不到的自由自由度，行程贴边时由这里拦截压入速度。
+ */
+export function solveHingeRangeVelocity(hinge: MRHingeJoint): void {
+  const A = hinge.A;
+  const B = hinge.B;
+  const n = A.rot.applyToVec3(hinge.hingeAxisALocal, tH1);
+  const vA = A.rot.applyToVec3(hinge.refAxisALocal, tH2);
+  const vB = B.rot.applyToVec3(hinge.refAxisBLocal, tH3);
+  vA.addScaled(n, -n.dot(vA));
+  if (vA.lengthSqr() < 1e-12) return;
+  vA.normalize();
+  vB.addScaled(n, -n.dot(vB));
+  if (vB.lengthSqr() < 1e-12) return;
+  if (measureViolation(n, vA, vB, hinge.aMin, hinge.aMax, tCross, tRa, tCorr) > 0) {
+    solveLimitVelocity(A, B, tCorr);
+  }
 }
 
 /** 诊断（M3 验收用）：当前行程角（弧度） */

@@ -45,6 +45,8 @@ export class MRActiveController extends Component {
   private motors = new Map<string, MRMotor>();
   /** 原始动画下各骨骼的 bind 局部旋转（采集 qTarget_rel 的参考系） */
   private motorStrengthScale = 1;
+  /** 每关节电机对应的 bind 局部旋转 qLA/qLB（ensureMotors 时从 ragdoll.bindings 缓存） */
+  private motorBind = new Map<string, { qLA: MRQuat; qLB: MRQuat }>();
 
   onLoad(): void {
     this.ragdoll = this.getComponent(MRRagdoll);
@@ -58,8 +60,9 @@ export class MRActiveController extends Component {
     const inst = this.ragdoll?.instance;
     if (!inst || this.motors.size > 0) return;
 
-    const parentOf = new Map<string, string | null>();
-    for (const bd of inst.def.bodies) parentOf.set(bd.name, bd.parent);
+    // bind 局部旋转（MRRagdoll.build 时快照）：bone 世界旋转 = q_body ⊗ localRot
+    const bindByBody = new Map<string, MRQuat>();
+    for (const b of this.ragdoll!.bindings) bindByBody.set(b.body.name, b.localRot);
 
     for (const bd of inst.def.bodies) {
       const parentName = bd.parent;
@@ -67,6 +70,9 @@ export class MRActiveController extends Component {
       const A = inst.bodies.get(parentName);
       const B = inst.bodies.get(bd.name);
       if (!A || !B) continue;
+      const qLA = bindByBody.get(parentName);
+      const qLB = bindByBody.get(bd.name);
+      if (!qLA || !qLB) continue;
       const motor = new MRMotor(A, B);
       motor.name = `${bd.name} motor`;
       // §5.2 整定起点：踝 60~120、四肢 80~200、躯干 200~400
@@ -81,6 +87,7 @@ export class MRActiveController extends Component {
       motor.tauMax = this.tauMax;
       motor.strength = this.strength * this.motorStrengthScale;
       this.motors.set(bd.name, motor);
+      this.motorBind.set(bd.name, { qLA, qLB });
       inst.solver.motors.push(motor);
     }
   }
@@ -88,7 +95,15 @@ export class MRActiveController extends Component {
   /**
    * 每帧物理步进前采集目标姿态：读取各骨骼节点世界旋转（动画驱动），
    * 换算成求解器关节参考系下的目标相对旋转 qTarget_rel。
-   * 允许滞后一帧（§5.3，对观感无影响）。
+   *
+   * 参考系换算（[v1.3] 修复）：骨骼世界旋转 = q_body ⊗ localRot（MRRagdoll 回写定义），
+   *   q_rel_bone = conj(qA_bone) ⊗ qB_bone = conj(qLA) ⊗ q_rel_body ⊗ qLB
+   *   ⇒ q_rel_body_target = qLA ⊗ q_rel_bone ⊗ conj(qLB)。
+   * 缺这层换算时目标带 bind 局部旋转的恒定错位角（人体骨架 T-pose 局部旋转
+   * 非 identity），电机会以大力矩永远追逐一个错位目标 —— 手腕等轻小肢体
+   * 打满 DW_CLAMP 形成稳态 bang-bang（实测 handR 恒 20~30 rad/s 每帧翻转）。
+   * 动画停止时 q_rel_bone 停在 bind 值 ⇒ target 精确等于 bind 刚体相对旋转
+   * ⇒ 误差归零、τ=0，系统按物理自然衰减静止。
    */
   private captureTargets(): void {
     const inst = this.ragdoll?.instance;
@@ -99,26 +114,23 @@ export class MRActiveController extends Component {
     const boneByName = new Map<string, Node>();
     BONE_ORDER.forEach((name, i) => boneByName.set(name, bones[i]));
 
-    // 骨骼世界旋转 → 相对父骨骼 → 映射到求解器关节参考系
-    // qTarget_rel(q0 系) = conj(qA_bind)·qA_anim⁻¹·qB_anim（B 相对 A 的动画相对旋转，
-    // 再经 bind 映射换算到求解器 q0Bind 参考系：qTarget = conj(q0)·q_rel_anim_map …）
-    // 简化实现（bind 参考系 = 构建时骨骼 bind 旋转）：直接以动画相对旋转为目标，
-    // 电机把刚体相对旋转拉向它 —— 与"骨骼回写以刚体为准"的松耦合跟随一致（§5.3）。
     for (const [childName, motor] of this.motors) {
       const boneB = boneByName.get(childName);
       const parentName = motor.A.name;
       const boneA = boneByName.get(parentName);
-      if (!boneB || !boneA) continue;
-      // 相对旋转：q_rel = conj(qA) ⊗ qB（A 局部系）
+      const bind = this.motorBind.get(childName);
+      if (!boneB || !boneA || !bind) continue;
       const qA = boneA.worldRotation;
       const qB = boneB.worldRotation;
+      const qa = tRel1.set(qA.x, qA.y, qA.z, qA.w);
+      const qb = tRel2.set(qB.x, qB.y, qB.z, qB.w);
+      // q_rel_bone = conj(qA) ⊗ qB
+      const rel = tRel3.multiply(qa.conjugateInPlace(), qb);
+      // target = qLA ⊗ rel ⊗ conj(qLB)（→ 求解器参考系）
+      const t = tRel4.multiply(bind.qLA, rel);
+      t.multiply(t, tRel5.copy(bind.qLB).conjugateInPlace());
       const target = motor.targetRelLocal;
-      target.set(
-        qA.w * qB.x - qA.x * qB.w - qA.y * qB.z + qA.z * qB.y,
-        qA.w * qB.y + qA.y * qB.w + qA.z * qB.x - qA.x * qB.z,
-        qA.w * qB.z + qA.z * qB.w + qA.x * qB.y - qA.y * qB.x,
-        qA.w * qB.w - qA.x * qB.x - qA.y * qB.y - qA.z * qB.z,
-      );
+      target.set(t.x, t.y, t.z, t.w);
       target.normalize();
     }
   }
@@ -194,3 +206,10 @@ export class MRActiveController extends Component {
     return up.y < pelvisUpThreshold;
   }
 }
+
+// captureTargets 模块级临时量
+const tRel1 = new MRQuat();
+const tRel2 = new MRQuat();
+const tRel3 = new MRQuat();
+const tRel4 = new MRQuat();
+const tRel5 = new MRQuat();

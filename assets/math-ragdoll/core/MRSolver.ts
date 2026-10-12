@@ -5,6 +5,7 @@
  * 子步内固定顺序（确定性要求）：
  *   电机（速度冲量，积分前）→ 重力/阻尼/clamp/积分 → 球关节/铰链位置
  *   → 铰链角对齐 → 锥扭限位 → 铰链行程限位 → 接触（法向+摩擦）→ 速度更新
+ *   → 限位速度松弛（单边约束速度投影）
  *
  * 查漏补缺勘误（相对设计文档）：
  * - 电机施加时机统一为"子步积分前"（§3.2 伪代码原放在求解阶段，与 §5.2 矛盾）。
@@ -17,7 +18,7 @@ import { MRCapsule } from './MRShape';
 import { capsuleCapsule, detectCapsuleGroundPoint } from './MRCollision';
 import { MRContact } from './MRContact';
 import { MRBallJoint, MRHingeJoint } from './MRJoint';
-import { MRConeTwistLimit, solveHingeRange } from './MRLimit';
+import { MRConeTwistLimit, solveHingeRange, solveHingeRangeVelocity } from './MRLimit';
 import { MRMotor } from './MRMotor';
 import { IGround } from './MRGround';
 
@@ -40,7 +41,13 @@ export class MRSolver {
   substeps = 8;
   gravity = new MRVec3(0, -9.81, 0);
   linDamp = 0.05;
-  angDamp = 0.05;
+  /**
+   * 角阻尼：衰减时间常数 1/angDamp。0.05（文档默认起点）意味着任何残余角速度
+   * 要 ~20s 才衰减到不可见 —— 落地后"骨头原地抽搐很长时间"的直接原因之一
+   * （位置法约束每子步注入的微扰没有足够耗散通道）。0.25 → ~4s 静止，
+   * 对落地翻滚观感影响可忽略（布娃娃本应快速瘫软）。
+   */
+  angDamp = 0.25;
   /**
    * 接触求解迭代轮数（每轮重新检测 + 求解）。
    * 位置法接触是隐式弹簧：稳态穿透 d ≈ N/(m/h²)。同刚体双端点接触的旋转耦合
@@ -109,6 +116,16 @@ export class MRSolver {
         quatDeltaToAngularVelocity(dqTmp, h, b.w);
         clampVel(b);
       }
+
+      // ---- 4. 速度松弛（XPBD 速度阶段：单边/等式约束的速度投影）----
+      // 位置法约束的修正经速度回读变成速度，与持续压入源（重力/电机/
+      // 约束耦合）形成固定步级方波 —— 贴边关节原地高频抽搐的根源。
+      // 顺序与位置阶段一致（确定性）：关节 → 角对齐 → 限位 → 接触。
+      for (let i = 0; i < this.ballJoints.length; i++) this.ballJoints[i].solveVelocity();
+      for (let i = 0; i < this.hinges.length; i++) this.hinges[i].solveVelocity();
+      for (let i = 0; i < this.limits.length; i++) this.limits[i].solveVelocity();
+      for (let i = 0; i < this.hinges.length; i++) solveHingeRangeVelocity(this.hinges[i]);
+      this.detectAndSolveContactVelocities();
     }
   }
 
@@ -158,6 +175,32 @@ export class MRSolver {
             this.contactCount++;
           }
         }
+      }
+    }
+  }
+
+  /**
+   * 接触速度松弛：重新检测（位置阶段后位姿未再变，结果一致）后逐接触
+   * 消除朝穿透方向的相对法向速度。不做接触池记录，检测开销微秒级。
+   */
+  private detectAndSolveContactVelocities(): void {
+    for (let p = 0; p < this.collisionPairs.length; p++) {
+      const [ia, ib] = this.collisionPairs[p];
+      const contact = this.acquireContact();
+      if (capsuleCapsule(this.capsules[ia], this.capsules[ib], contact)) {
+        contact.solveVelocity();
+      }
+    }
+    const ground = this.ground;
+    if (ground !== null) {
+      const gcA = this.groundContactA ??= new MRContact(this.bodies[0], null);
+      const gcB = this.groundContactB ??= new MRContact(this.bodies[0], null);
+      for (let i = 0; i < this.capsules.length; i++) {
+        const cap = this.capsules[i];
+        cap.worldP1(tGroundP1);
+        cap.worldP2(tGroundP2);
+        if (detectCapsuleGroundPoint(cap, tGroundP1, ground, gcA)) gcA.solveVelocity();
+        if (detectCapsuleGroundPoint(cap, tGroundP2, ground, gcB)) gcB.solveVelocity();
       }
     }
   }

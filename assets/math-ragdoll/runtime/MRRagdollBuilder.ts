@@ -29,8 +29,31 @@ const MASS_RATIO: Record<string, number> = {
   thighR: 10.0, shinR: 5.7,
 };
 
-/** 末端体（无子骨骼）的 capsule 延长长度（米）：head/hand/shin 等末端段 */
+/** 末端体（无子骨骼）的 capsule 延长长度（米）：head/hand 等末端段 */
 const END_EXTEND_LEN = 0.22;
+
+/**
+ * 末端体延长长度覆盖：小腿 capsule 需向下延长到脚底（foot 并入小腿，§4.1）。
+ * 取值 = 本测试人形"膝节点离地高度 − 胶囊半径"（0.5 − 0.12），使 capsule 圆帽
+ * 底端与视觉腿盒底端同高（站立时同时触地）。通用 END_EXTEND_LEN 只覆盖 0.22m，
+ * 会让物理脚悬在离地 0.17m 处，站立时视觉腿插进地面。
+ */
+const END_EXTEND_OVERRIDE: Record<string, number> = {
+  shinL: 0.38, shinR: 0.38,
+};
+
+/**
+ * capsule 半径表（§7.1 基准，与测试人形视觉半宽一致）。
+ * 通用公式 0.45×线段半长在末端短段上会算出远小于视觉的半径（头 0.0495 vs
+ * 视觉头球 0.11），躺地时视觉插地 ~6cm（实测）；躯干同样偏细。表外名字回退公式。
+ */
+const RADIUS_TABLE: Record<string, number> = {
+  pelvis: 0.11, chest: 0.12, head: 0.11,
+  upperArmL: 0.05, forearmL: 0.045, handL: 0.04,
+  upperArmR: 0.05, forearmR: 0.045, handR: 0.04,
+  thighL: 0.075, thighR: 0.075,
+  shinL: 0.06, shinR: 0.06,
+};
 
 /** 关节限位默认表（§7.2，弧度） */
 const DEG = Math.PI / 180;
@@ -118,7 +141,8 @@ export function buildSkeletonDef(boneNodes: Node[], opts: BuildOptions = {}): Sk
         else dir.set(0, -1, 0);
       }
       end = near.clone();
-      Vec3.scaleAndAdd(end, near, dir, END_EXTEND_LEN);
+      const extend = END_EXTEND_OVERRIDE[name] ?? END_EXTEND_LEN;
+      Vec3.scaleAndAdd(end, near, dir, extend);
     }
     nameToJointPos.set(name, near);
     nameToEndPos.set(name, end);
@@ -136,7 +160,7 @@ export function buildSkeletonDef(boneNodes: Node[], opts: BuildOptions = {}): Sk
     const com = near.clone().add(end).multiplyScalar(0.5);
     const qNode = node.worldRotation.clone();
 
-    const radius = Math.min(0.12, Math.max(0.03, 0.45 * halfLen)) * scaleAdjust;
+    const radius = (RADIUS_TABLE[name] ?? Math.min(0.12, Math.max(0.03, 0.45 * halfLen))) * scaleAdjust;
 
     // capsule 局部端点：R⁻¹·(joint − COM)
     const p1Local = toMrLocal(com, qNode, near, mrTmp1);
