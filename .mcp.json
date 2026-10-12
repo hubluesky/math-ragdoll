@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cocos-creator": {
+      "command": "node",
+      "args": ["extensions/cocos-mcp/bridge/cocos-mcp-bridge.js"]
+    }
+  }
+}

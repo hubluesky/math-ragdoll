@@ -1,0 +1,14 @@
+{
+  "name": "math-ragdoll",
+  "uuid": "8a097230-6358-44d8-a8fa-29edeecddd9c",
+  "creator": {
+    "version": "3.8.7"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.3"
+  }
+}

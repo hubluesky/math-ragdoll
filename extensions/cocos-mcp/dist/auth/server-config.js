@@ -1,0 +1,1 @@
+"use strict";Object.defineProperty(exports,"__esModule",{value:!0}),exports.isAuthDisabled=function(){return!0},exports.getAuthConfig=function(){return{serverUrl:"",publicKey:"",serviceName:"cocos-mcp",version:"1.6.0",authDisabled:!0}};

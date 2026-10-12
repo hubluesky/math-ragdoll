@@ -1,0 +1,93 @@
+{
+  "configurations": [
+    {
+      "id": "d6fb1c80-225d-4f84-bb19-b6f54062e58f",
+      "name": "默认配置",
+      "description": "自动创建的默认工具配置",
+      "tools": [
+        {
+          "category": "cocos",
+          "name": "scene",
+          "enabled": true,
+          "description": "SCENE MANAGEMENT: Complete scene operations. Actions: get_info (current scene details), list (all project scenes), open (switch scene, requires scenePath), save (persist changes), create (new scene, requires sceneName+savePath), close (close scene), hierarchy (scene node tree, optional includeComponents), is_ready (check scene status), is_dirty (unsaved changes check), snapshot (save state), undo_begin/undo_end/undo_cancel (undo recording), execute_method (call component method), execute_script (run scene script), soft_reload (reload scene), query_mode (detect scene vs prefab-edit mode)"
+        },
+        {
+          "category": "cocos",
+          "name": "node",
+          "enabled": true,
+          "description": "NODE OPERATIONS: Complete node management with smart path resolution. Accepts UUID, path (e.g. \"Canvas/Panel/Button\"), or name for all node parameters. Actions: find (search nodes, returns all matches with paths for duplicates), info (node details), list (all nodes), tree (hierarchy tree), create (new node, auto-adds UITransform under UI parents), delete, modify (set properties/transform), move (reparent), duplicate, copy, paste, cut, mount_script (attach script), remove_script (detach script), reset (reset properties/transform), detect_type (analyze node type)"
+        },
+        {
+          "category": "cocos",
+          "name": "component",
+          "enabled": true,
+          "description": "COMPONENT OPERATIONS: Manage components on nodes. Accepts UUID, path, or name for node parameter. Actions: add (attach component), remove (detach component, use exact CID from list), list (all components on node), info (component details), set_property (set component property, auto-detects type if omitted), available_types (list all component types), click_event (configure button click events)"
+        },
+        {
+          "category": "cocos",
+          "name": "prefab",
+          "enabled": true,
+          "description": "PREFAB OPERATIONS: Complete prefab management. Accepts UUID, path, or name for node/parent parameters. Actions: list (browse prefabs, optional folder), info (prefab details, requires prefabPath), validate (check integrity), create (convert node to prefab, requires node+prefabName+savePath), delete (remove prefab file), instantiate (create instance in scene, requires prefabPath+parent), unlink (break prefab connection), apply (save instance changes to prefab), revert (restore to prefab state), edit_enter (start editing), edit_save (save edits), edit_exit (return to scene), edit_test (test prefab)"
+        },
+        {
+          "category": "cocos",
+          "name": "asset",
+          "enabled": true,
+          "description": "ASSET MANAGEMENT: Complete asset operations. Actions: query_info (asset details by path/UUID), search (find assets by type/folder), find_by_name (search by name pattern), details (deep asset info with sub-assets), create (new asset file), copy, move, delete, save (write content), reimport, import (from external), refresh (refresh asset DB), dependencies (analyze asset deps), manifest (export asset list), check_ready (DB ready check), query_path/query_uuid/query_url (path-UUID-URL conversions)"
+        },
+        {
+          "category": "cocos",
+          "name": "editor",
+          "enabled": true,
+          "description": "EDITOR OPERATIONS: Project management, debugging, preferences, and server control. Actions grouped by domain: PROJECT: project_info, project_settings, run, build, build_settings, open_build_panel, builder_status, start_preview, stop_preview | DEBUG: console_logs, console_clear, log_read, log_search, log_info, mcp_log_read, mcp_log_clear, editor_info, performance | PREFERENCES: pref_open, pref_get, pref_set, pref_reset, pref_all, pref_categories, pref_search, pref_export | SERVER: server_ips, server_port, server_status, server_test, server_interfaces"
+        },
+        {
+          "category": "cocos",
+          "name": "view",
+          "enabled": true,
+          "description": "SCENE VIEW & REFERENCE IMAGE: Viewport manipulation and reference images. GIZMO: gizmo_tool (change/query transform tool), gizmo_pivot, gizmo_coordinate | MODE: mode_2d_3d (switch 2D/3D), grid (set/query grid) | ICON: icon_3d_mode, icon_size | CAMERA: camera_focus (focus on nodes), camera_align_view, camera_align_node | STATUS: status, reset_view | REF IMAGE: ref_add, ref_remove, ref_switch, ref_clear, ref_config, ref_current, ref_list, ref_position, ref_scale, ref_opacity, ref_data, ref_refresh"
+        },
+        {
+          "category": "cocos",
+          "name": "composite",
+          "enabled": true,
+          "description": "HIGH-LEVEL OPERATIONS: Create complete UI elements in one call. Actions: create_button (node+Sprite+Button+Label child), create_label (text node), create_image (image node with auto sprite), mount_and_bind (mount script + bind references), setup_widget (quick Widget alignment presets), batch (bulk create/clone nodes)"
+        },
+        {
+          "category": "cocos",
+          "name": "knowledge",
+          "enabled": true,
+          "description": "COCOS CREATOR KNOWLEDGE BASE: Query component properties, UI design rules, layout patterns, widget strategies, and TOOL USAGE GUIDES. Topics: component_properties (precise property table from engine source), ui_design_rules (sizing/spacing/font guidelines), layout_patterns (dialog/list/tab/HUD node structures), widget_strategy (alignment presets and responsive tips), node_structure (specific UI component hierarchies), tool_guide (IMPORTANT: query before calling unfamiliar tools — returns precise param definitions, types, and examples. Use \"tool.action\" format e.g. \"component.set_property\")"
+        },
+        {
+          "category": "cocos",
+          "name": "validate",
+          "enabled": true,
+          "description": "VALIDATION: Check scene for common issues. Actions: layout (button size, font size, empty Sprite checks), references (find broken node/asset refs), hierarchy (deep nesting, too many children warnings)"
+        },
+        {
+          "category": "cocos",
+          "name": "template",
+          "enabled": true,
+          "description": "UI TEMPLATES: Apply pre-built UI structure templates. Actions: list (show available templates), apply (create template structure under parent node). Templates: dialog, scroll_list, nav_bar, settings_page"
+        },
+        {
+          "category": "cocos",
+          "name": "capture",
+          "enabled": true,
+          "description": "SCENE SNAPSHOT: Get structured JSON layout of the current scene or a specific node subtree. Actions: scene_snapshot (full scene hierarchy with positions, sizes, widget, camera, resolution), node_snapshot (focused subtree with full component details — handles duplicate names via UUID/path)"
+        },
+        {
+          "category": "cocos",
+          "name": "builder",
+          "enabled": true,
+          "description": "BUILD SCENE FROM JSON: Pass a node tree JSON to create complete hierarchies with components and properties in one call. Use cocos_knowledge(topic:\"tool_guide\", query:\"builder.build\") for JSON format and component reference."
+        }
+      ],
+      "createdAt": "2026-10-10T10:29:25.684Z",
+      "updatedAt": "2026-10-10T10:29:25.684Z"
+    }
+  ],
+  "currentConfigId": "d6fb1c80-225d-4f84-bb19-b6f54062e58f",
+  "maxConfigSlots": 5
+}
