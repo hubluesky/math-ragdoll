@@ -122,7 +122,7 @@ export class MRSolver {
       // 约束耦合）形成固定步级方波 —— 贴边关节原地高频抽搐的根源。
       // 顺序与位置阶段一致（确定性）：关节 → 角对齐 → 限位 → 接触。
       for (let i = 0; i < this.ballJoints.length; i++) this.ballJoints[i].solveVelocity();
-      for (let i = 0; i < this.hinges.length; i++) this.hinges[i].solveVelocity();
+      for (let i = 0; i < this.hinges.length; i++) this.hinges[i].solveVelocity(h);
       for (let i = 0; i < this.limits.length; i++) this.limits[i].solveVelocity(h);
       for (let i = 0; i < this.hinges.length; i++) solveHingeRangeVelocity(this.hinges[i]);
       this.detectAndSolveContactVelocities();

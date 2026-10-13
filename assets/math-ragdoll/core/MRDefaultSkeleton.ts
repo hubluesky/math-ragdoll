@@ -17,7 +17,7 @@ import { MRVec3, MRQuat } from './MRMath';
 import { MRBody } from './MRBody';
 import { MRCapsule, boxInvInertia } from './MRShape';
 import { MRBallJoint, MRHingeJoint } from './MRJoint';
-import { MRConeTwistLimit, DEFAULT_TWIST_DAMP, DEFAULT_TWIST_STIFFNESS } from './MRLimit';
+import { MRConeTwistLimit, DEFAULT_TWIST_DAMP, DEFAULT_TWIST_STIFFNESS, DEFAULT_FLEX_DAMP } from './MRLimit';
 import { MRSolver } from './MRSolver';
 import { BodyDef, JointDef, SkeletonDef, buildCollisionPairs } from './MRSkeletonDef';
 
@@ -248,6 +248,8 @@ export function instantiateSkeleton(
       joint.refAxisBLocal.set(rb[0], rb[1], rb[2]);
       joint.aMin = lim?.aMin ?? 0;
       joint.aMax = lim?.aMax ?? Math.PI;
+      // [v1.8] 铰链弯曲被动阻尼：缺省引擎默认（关节被动矩黏性项），显式 0 关闭
+      joint.flexDamp = lim.flexDamp ?? DEFAULT_FLEX_DAMP;
       joint.name = `${jd.b} hinge`;
       hinges.push(joint);
       solver.hinges.push(joint);

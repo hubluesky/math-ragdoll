@@ -225,6 +225,11 @@ export class MRHingeJoint {
   /** 行程范围（弧度），由 MRLimit.solveHingeRange 处理 */
   aMin = 0;
   aMax = Math.PI;
+  /**
+   * 铰链弯曲被动阻尼时间常数（秒）：[v1.8] 关节被动矩模型的黏性项（肘/膝），
+   * 见 MRLimit.DEFAULT_FLEX_DAMP。0 = 关闭。
+   */
+  flexDamp = 0;
   name = '';
 
   constructor(A: MRBody, B: MRBody) {
@@ -249,13 +254,25 @@ export class MRHingeJoint {
     applyAngularPair(A, B, corr);
   }
 
-  /** 速度松弛：锚点速度投影 + 铰链轴对齐的双向角速度投影（行程限位另由 MRLimit 处理） */
-  solveVelocity(): void {
+  /** 速度松弛：锚点速度投影 + 铰链轴对齐的双向角速度投影（行程限位另由 MRLimit 处理）。
+   *  之后施加弯曲被动阻尼（flexDamp>0 时恒激活）：沿铰链轴按 f = 1 − e^(−h/τ_b)
+   *  消除相对角速度——[v1.8] 关节被动矩模型的黏性项（肘/膝），治"击打后关节被
+   *  重力缓缓拖直的长尾"（沉降 τ 5~15s → ~0.5s），物理依据见 MRLimit.DEFAULT_FLEX_DAMP。
+   *  h = 子步步长（弯曲阻尼的时间常数离散化需要）。 */
+  solveVelocity(h: number): void {
     solveBallVelocity(this.A, this.B, this.rALocal, this.rBLocal);
     const uA = this.A.rot.applyToVec3(this.hingeAxisALocal, tU1);
     const uB = this.B.rot.applyToVec3(this.hingeAxisBLocal, tU2);
     const corr = tG1.cross(uA, uB);
     projectRelativeAngularVelocity(this.A, this.B, corr, false);
+    // ---- 弯曲被动阻尼（[v1.8] 关节被动矩黏性项，恒激活）----
+    // 轴 = 铰链轴（弯曲自由度的旋转轴）；对齐投影的 corr = uA×uB ⊥ 铰链轴，
+    // 两者正交互不干扰。
+    if (this.flexDamp > 0) {
+      const ax = this.A.rot.applyToVec3(this.hingeAxisALocal, tU3);
+      const f = 1 - Math.exp(-h / this.flexDamp);
+      projectRelativeAngularVelocity(this.A, this.B, ax, false, Math.min(f, 0.5));
+    }
   }
 }
 

@@ -37,6 +37,9 @@ export interface JointDef {
     /** [v1.5] 球关节被动扭转刚度回中时间常数（秒，关节囊弹性项，见 MRLimit.DEFAULT_TWIST_STIFFNESS）；
      *  缺省用引擎默认，显式 0 = 关闭 */
     twistStiffness?: number;
+    /** [v1.8] 铰链弯曲被动阻尼时间常数（秒，关节被动矩黏性项，见 MRLimit.DEFAULT_FLEX_DAMP）；
+     *  缺省用引擎默认，显式 0 = 关闭 */
+    flexDamp?: number;
     /** 铰链行程（hinge） */
     aMin?: number;
     aMax?: number;
