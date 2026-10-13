@@ -17,7 +17,7 @@ import { MRVec3, MRQuat } from './MRMath';
 import { MRBody } from './MRBody';
 import { MRCapsule, boxInvInertia } from './MRShape';
 import { MRBallJoint, MRHingeJoint } from './MRJoint';
-import { MRConeTwistLimit } from './MRLimit';
+import { MRConeTwistLimit, DEFAULT_TWIST_DAMP, DEFAULT_TWIST_STIFFNESS } from './MRLimit';
 import { MRSolver } from './MRSolver';
 import { BodyDef, JointDef, SkeletonDef, buildCollisionPairs } from './MRSkeletonDef';
 
@@ -226,6 +226,10 @@ export function instantiateSkeleton(
         limit.coneMax = lim.coneMax ?? 0;
         limit.twistMin = lim.twistMin ?? 0;
         limit.twistMax = lim.twistMax ?? 0;
+        // [v1.4] 被动扭转黏性阻尼：缺省引擎默认（关节囊黏性项），显式 0 关闭
+        limit.twistDamp = lim.twistDamp ?? DEFAULT_TWIST_DAMP;
+        // [v1.5] 被动扭转刚度（回中）：缺省引擎默认（关节囊弹性项），显式 0 关闭
+        limit.twistStiffness = lim.twistStiffness ?? DEFAULT_TWIST_STIFFNESS;
         limit.name = `${jd.b} limit`;
         limits.push(limit);
         solver.limits.push(limit);

@@ -43,11 +43,14 @@ export class MRBody {
     this.invIworld.mulMat(this.invIworld, rotTransposeTmp);
   }
 
-  /** 静态体初始化辅助 */
+  /** 静态体初始化辅助：invI 清零并刷新派生缓存（rot/invIworld——静态体不参与
+   *  求解器的预测阶段，若不在此刷新，rot 将保持零矩阵，任何读取 A.rot 的
+   *  约束/阻尼测量都会拿到退化向量） */
   makeStatic(): this {
     this.isStatic = true;
     this.invMass = 0;
     this.invIlocal.setDiagonal(0, 0, 0);
+    this.refreshDerived();
     return this;
   }
 }

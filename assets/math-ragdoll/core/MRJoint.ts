@@ -94,7 +94,11 @@ function subSkewBlock(K: MRMat3, r: Readonly<MRVec3>, invI: Readonly<MRMat3>): v
  * oneSided=true（单边约束：限位）只消除"加深违反"方向的分量（wRel<0），
  * 退出违反方向不助推；oneSided=false（等式约束：角对齐）双向压到 0。
  *
- * 0.5 欠松弛与位置阶段（applyAngularPair 每步消除一半违反）对称：
+ * relax = 本次调用消除的违反比例（0 < relax ≤ 1）：
+ * - 0.5（默认）：位置阶段 applyAngularPair 每步消除一半违反的欠松弛，两者对称；
+ * - 被动扭转黏性阻尼（MRConeTwistLimit.twistDamp）传 f = 1 − e^(−h/τ)，
+ *   把相对滚转速率按时间常数 τ 指数衰减（见 MRLimit 文档）。
+ *
  * 速度级序贯投影在多约束循环耦合（12 关节 × 锚点/角对齐/限位/接触）下
  * 全量投影会互相拉锯发散（实测 3s 内冲到 1~3 m/s），欠松弛后子步级
  * 收敛仍远快于固定步级方波周期，抑制效果不减。
@@ -104,7 +108,7 @@ function subSkewBlock(K: MRMat3, r: Readonly<MRVec3>, invI: Readonly<MRMat3>): v
  * 绕铰链轴 12 rad/s 拧转永不衰减：拧转是行程限位测不到的自由自由度）。
  */
 export function projectRelativeAngularVelocity(
-  A: MRBody, B: MRBody, corr: Readonly<MRVec3>, oneSided: boolean,
+  A: MRBody, B: MRBody, corr: Readonly<MRVec3>, oneSided: boolean, relax = 0.5,
 ): void {
   const C = corr.length();
   if (C < 1e-12 || !Number.isFinite(C)) return;
@@ -113,7 +117,7 @@ export function projectRelativeAngularVelocity(
   if (oneSided ? wRel >= 0 : Math.abs(wRel) < 1e-12) return;
   const w = angularInvMassAlong(A, n) + angularInvMassAlong(B, n);
   if (w <= 1e-12) return;
-  const j = -0.5 * wRel / w;
+  const j = -relax * wRel / w;
   applyInvI(A, n, tD1A);
   A.w.addScaled(tD1A, j);
   applyInvI(B, n, tD1B);

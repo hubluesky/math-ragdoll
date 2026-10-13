@@ -31,6 +31,12 @@ export interface JointDef {
     coneMax?: number;
     twistMin?: number;
     twistMax?: number;
+    /** [v1.4] 球关节被动扭转阻尼时间常数（秒，关节囊黏性项，见 MRLimit.DEFAULT_TWIST_DAMP）；
+     *  缺省用引擎默认，显式 0 = 关闭 */
+    twistDamp?: number;
+    /** [v1.5] 球关节被动扭转刚度回中时间常数（秒，关节囊弹性项，见 MRLimit.DEFAULT_TWIST_STIFFNESS）；
+     *  缺省用引擎默认，显式 0 = 关闭 */
+    twistStiffness?: number;
     /** 铰链行程（hinge） */
     aMin?: number;
     aMax?: number;

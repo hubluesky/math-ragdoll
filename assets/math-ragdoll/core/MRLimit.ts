@@ -13,7 +13,7 @@
  */
 import { MRVec3, MRQuat, clamp } from './MRMath';
 import { MRBody } from './MRBody';
-import { MRHingeJoint, applyAngularPair, projectRelativeAngularVelocity } from './MRJoint';
+import { MRHingeJoint, applyAngularPair, projectRelativeAngularVelocity, angularInvMassAlong, applyInvI } from './MRJoint';
 
 /**
  * 限位软边界：修正目标点是外推 LIMIT_SLOP 的软边界，而非硬边界。
@@ -26,6 +26,52 @@ import { MRHingeJoint, applyAngularPair, projectRelativeAngularVelocity } from '
  * 全量爆发，脉冲反而更大。
  */
 export const LIMIT_SLOP = 0.25 * Math.PI / 180;
+
+/**
+ * 球关节被动扭转阻尼默认时间常数（秒）。
+ *
+ * 物理依据：关节囊是预张紧的黏弹性膜，骨骼绕关节轴拧转时囊膜被绞紧，
+ * 产生全范围（不限位边界内也生效）的黏性阻力矩——放松人体的被动轴向转动
+ * 在 0.3~0.5s 内自然停止，绝不会像光滑圆柱一样自由旋转。现有模型只有
+ * 韧带"硬墙"（锥面/扭转限位）而缺这一黏性项，落地冲击注入的滚转角速度
+ * 只能靠全局 angDamp（τ≈4s）耗散 —— 实测手部以 ~10 rad/s 自由滚转 4 秒
+ * 以上、限位边界拍打放大到 30~55 rad/s（"圆柱式自转"的直接根因）。
+ *
+ * 数学形式：I_r·dω_t/dt = −c·ω_t，c = I_r/τ ⟹ ω_t(t) = ω_t(0)·e^(−t/τ)；
+ * 每子步消除比例 f = 1 − e^(−h/τ)（≤0.5 钳制，同电机 kd 稳定模式），
+ * 按广义逆质量分摊 —— 复用 projectRelativeAngularVelocity（relax=f）。
+ * 只作用扭转轴 n̂2，不阻尼锥面摆动（布娃娃"瘫软"观感本体 + 弯曲阻力
+ * 确实小），τ 与模型尺度无关。逐关节可覆盖（JointDef.limit.twistDamp），
+ * 显式 0 = 关闭。
+ *
+ * [v1.6] 0.15 → 0.05：0.15s 下冲击注入的扭转角速率（~15 rad/s）在衰减前
+ * 已把扭角扫满 ±45° 限位（渐近扫角 = ω0·τ_d = 129° >> 45°），用户观感
+ * "自转幅度太大"（限位全幅来回）。0.05s 时渐近扫角 = ω0·τ_d ≈ 43°，
+ * 配合刚度项把击打后扭转峰值压到 ~27°（实测）。
+ */
+export const DEFAULT_TWIST_DAMP = 0.05;
+
+/**
+ * 球关节被动扭转刚度默认回中时间常数（秒）——关节囊黏弹性模型的弹性项。
+ *
+ * 物理依据：真实关节囊是**预张紧**的膜，轴向拧转会绞紧囊膜产生指向中性位
+ * 的回复力矩——放松的肢体被拧转后会缓慢回中，而不是带着扭转角继续"流"。
+ * 仅黏性阻尼（twistDamp）的数学极限：静置承重时接触/摩擦/速度回读每子步
+ * 持续注入微小滚转，阻尼只能把它平衡成**恒定滚转速率**（ω_ss = 注入率×τ，
+ * 实测 0.2~0.5 rad/s）——肢体恒速绕轴自转，直到撞上 ±45°/±15° 扭转限位
+ * 才停（0.35 rad/s 转满 45° ≈ 2s，即用户看到的"自转一两秒后停止"）。
+ * 弹性项把渗漏平衡成**静态扭转角**（θ_ss = 注入率×τ_s，限位内），
+ * 速度归零——肢体静止，与真实关节一致。
+ *
+ * 实现：每子步将当前扭角向 0 修正比例 g = h/τ_s（≤0.25 钳制），轴 = 子体
+ * 关节轴 a1（与锥面摆动正交，同 twistDamp 的轴选择依据），修正量经
+ * applyAngularPair 按广义逆质量分摊。0 = 关闭。逐关节可覆盖
+ * （JointDef.limit.twistStiffness）。
+ *
+ * [v1.6] 0.3 → 0.08：配合阻尼加强（v1.6），把击打后扭转峰值进一步压低
+ * （实测静置击打 27° → 9°），且回中更快（e^(-t/0.08)）。
+ */
+export const DEFAULT_TWIST_STIFFNESS = 0.08;
 
 /** 绕轴 n 从 a 到 b 的有符号角（参考实现 getAngle） */
 function getAngle(n: Readonly<MRVec3>, a: Readonly<MRVec3>, b: Readonly<MRVec3>, tmpCross: MRVec3): number {
@@ -110,6 +156,16 @@ export class MRConeTwistLimit {
   coneMax = 0;
   twistMin = 0;
   twistMax = 0;
+  /**
+   * 被动扭转阻尼时间常数（秒）：关节囊黏性项，见 DEFAULT_TWIST_DAMP。
+   * 0 = 关闭（限位边界投影仍生效）。
+   */
+  twistDamp = 0;
+  /**
+   * 被动扭转刚度回中时间常数（秒）：关节囊弹性项，见 DEFAULT_TWIST_STIFFNESS。
+   * 0 = 关闭。
+   */
+  twistStiffness = 0;
   name = '';
 
   constructor(A: MRBody, B: MRBody) {
@@ -164,10 +220,19 @@ export class MRConeTwistLimit {
 
   /**
    * 速度松弛（XPBD 速度阶段，子步速度更新后调用）：
-   * 锥面与扭转各自独立投影——测量与 solve() 同构，仅把位置修正换成
+   * 锥面与扭转限界各自独立投影——测量与 solve() 同构，仅把位置修正换成
    * "加深违反方向的相对角速度消除"。
+   * 之后施加被动扭转黏弹性（twistDamp/twistStiffness > 0 时恒激活，限位内也作用）：
+   * - 黏性：沿子体关节轴 a1 按 f = 1 − e^(−h/τ_d) 消除相对滚转速率（见 DEFAULT_TWIST_DAMP）；
+   * - 弹性：沿 a1 施加 Δω_rel = −(h/τ_s²)·θ 的相对角速度冲量（θ = a1 轴扭角，
+   *   物理弹簧离散化，见 DEFAULT_TWIST_STIFFNESS）。
+   * 轴选 a1（子体关节轴）而非 n̂2 的依据见 DEFAULT_TWIST_DAMP 注释
+   * （与锥面摆动正交解耦；n̂2 在大锥角下与锥面边界投影拉锯实测发散）。
+   * 弹性曾尝试位置级（每子步角度修正 g·θ），实测经速度回读变成 θ/τ_s 量级的
+   * 速度踢，在承重/电机场景与约束打擂台（M4 闭环 |v|=0.21、肘对齐 24 rad/s
+   * 抖动）——速度级冲量形式平滑注入、由黏性项吸收，无位置擂台。
    */
-  solveVelocity(): void {
+  solveVelocity(h: number): void {
     const A = this.A;
     const B = this.B;
     const a0 = A.rot.applyToVec3(this.axisALocal, tA0);
@@ -181,7 +246,7 @@ export class MRConeTwistLimit {
       }
     }
 
-    // ---- 扭转 ----
+    // ---- 扭转（限界）----
     const n2 = tN2.copy(a0).add(a1);
     const n2Len = n2.length();
     if (n2Len > 1e-9) {
@@ -192,6 +257,39 @@ export class MRConeTwistLimit {
       vB.addScaled(n2, -n2.dot(vB)).normalize();
       if (measureViolation(n2, vA, vB, this.twistMin, this.twistMax, tCross, tRa, tCorr) > 0) {
         solveLimitVelocity(A, B, tCorr);
+      }
+    }
+
+    // ---- 被动扭转黏弹性（关节囊，恒激活，轴 = 子体关节轴 a1）----
+    if (this.twistDamp > 0 || this.twistStiffness > 0) {
+      // 边界投影可能已转动身体，重算最新 a1
+      const ax1 = B.rot.applyToVec3(this.axisBLocal, tA1);
+      const vA = A.rot.applyToVec3(this.twistRefALocal, tVA);
+      const vB = B.rot.applyToVec3(this.twistRefBLocal, tVB);
+      vA.addScaled(ax1, -ax1.dot(vA));
+      vB.addScaled(ax1, -ax1.dot(vB));
+      if (vA.lengthSqr() > 1e-12 && vB.lengthSqr() > 1e-12) {
+        vA.normalize();
+        vB.normalize();
+        // 黏性：消除 f 比例的相对滚转速率
+        if (this.twistDamp > 0) {
+          const f = 1 - Math.exp(-h / this.twistDamp);
+          projectRelativeAngularVelocity(A, B, ax1, false, Math.min(f, 0.5));
+        }
+        // 弹性：Δω_rel = −(h/τ_s²)·θ，按广义逆质量分摊（物理弹簧离散化）
+        if (this.twistStiffness > 0) {
+          const theta = getAngle(ax1, vA, vB, tCross);
+          if (Math.abs(theta) > 1e-12) {
+            const w = angularInvMassAlong(A, ax1) + angularInvMassAlong(B, ax1);
+            if (w > 1e-12) {
+              const d = (-(h / (this.twistStiffness * this.twistStiffness)) * theta) / w;
+              applyInvI(B, ax1, tSpringB);
+              B.w.addScaled(tSpringB, d);
+              applyInvI(A, ax1, tSpringA);
+              A.w.addScaled(tSpringA, -d);
+            }
+          }
+        }
       }
     }
   }
@@ -270,3 +368,5 @@ const tCorr = new MRVec3();
 const tH1 = new MRVec3();
 const tH2 = new MRVec3();
 const tH3 = new MRVec3();
+const tSpringA = new MRVec3();
+const tSpringB = new MRVec3();

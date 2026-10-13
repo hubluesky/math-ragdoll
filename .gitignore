@@ -27,3 +27,7 @@ node_modules/
 /tests
 /.creator
 /tools
+/vitest.config.ts
+/.mcp.json
+/.zcodeignore
+/package-lock.json
